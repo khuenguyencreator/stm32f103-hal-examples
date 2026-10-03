@@ -19,10 +19,11 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include <stdio.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -32,7 +33,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define CAN_ID_BUTTON  0x123
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -41,36 +41,68 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-CAN_HandleTypeDef hcan;
+UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
-CAN_TxHeaderTypeDef TxHeader;
-CAN_RxHeaderTypeDef RxHeader;
-uint8_t TxData[8];
-uint8_t RxData[8];
-uint32_t TxMailbox;
-uint8_t count = 0;
+#define RB_SIZE   64        /* kich thuoc ring buffer */
+
+typedef struct
+{
+  uint8_t buf[RB_SIZE];
+  volatile uint16_t head;     /* vi tri ghi tiep theo */
+  volatile uint16_t tail;     /* vi tri doc tiep theo */
+} RingBuffer_t;
+
+RingBuffer_t rx_rb;
+uint8_t rx_byte;              /* byte vua nhan trong ngat */
+char line[32];                /* ban tin da ghep du 1 dong */
+uint8_t line_len = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_CAN_Init(void);
+static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+uint8_t RB_Put(RingBuffer_t *rb, uint8_t data);
+uint8_t RB_Get(RingBuffer_t *rb, uint8_t *data);
+void Process_Command(char *cmd);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-/* Nhan ban tin CAN trong ngat FIFO0 */
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+/* Ghi 1 byte vao ring buffer. Tra ve 0 neu buffer day */
+uint8_t RB_Put(RingBuffer_t *rb, uint8_t data)
 {
-  if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK)
+  uint16_t next = (rb->head + 1) % RB_SIZE;
+  if (next == rb->tail)
   {
-    if (RxHeader.StdId == CAN_ID_BUTTON)
-    {
-      HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-    }
+    return 0;                 /* day: bo byte moi */
+  }
+  rb->buf[rb->head] = data;
+  rb->head = next;
+  return 1;
+}
+
+/* Doc 1 byte tu ring buffer. Tra ve 0 neu buffer rong */
+uint8_t RB_Get(RingBuffer_t *rb, uint8_t *data)
+{
+  if (rb->head == rb->tail)
+  {
+    return 0;                 /* rong */
+  }
+  *data = rb->buf[rb->tail];
+  rb->tail = (rb->tail + 1) % RB_SIZE;
+  return 1;
+}
+
+/* Ngat nhan UART: chi day byte vao ring buffer roi nhan tiep */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART1)
+  {
+    RB_Put(&rx_rb, rx_byte);
+    HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
   }
 }
 /* USER CODE END 0 */
@@ -103,33 +135,10 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_CAN_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  CAN_FilterTypeDef sFilter;
-
-  /* Bo loc: nhan tat ca ban tin vao FIFO0 */
-  sFilter.FilterBank = 0;
-  sFilter.FilterMode = CAN_FILTERMODE_IDMASK;
-  sFilter.FilterScale = CAN_FILTERSCALE_32BIT;
-  sFilter.FilterIdHigh = 0x0000;
-  sFilter.FilterIdLow = 0x0000;
-  sFilter.FilterMaskIdHigh = 0x0000;
-  sFilter.FilterMaskIdLow = 0x0000;
-  sFilter.FilterFIFOAssignment = CAN_RX_FIFO0;
-  sFilter.FilterActivation = ENABLE;
-  sFilter.SlaveStartFilterBank = 14;
-  HAL_CAN_ConfigFilter(&hcan, &sFilter);
-
-  HAL_CAN_Start(&hcan);
-  HAL_CAN_ActivateNotification(&hcan, CAN_IT_RX_FIFO0_MSG_PENDING);
-
-  /* Khung du lieu chuan, ID 11 bit, 2 byte du lieu */
-  TxHeader.StdId = CAN_ID_BUTTON;
-  TxHeader.ExtId = 0;
-  TxHeader.IDE = CAN_ID_STD;
-  TxHeader.RTR = CAN_RTR_DATA;
-  TxHeader.DLC = 2;
-  TxHeader.TransmitGlobalTime = DISABLE;
+  printf("Ring Buffer UART demo. Gui \"LED ON\" hoac \"LED OFF\"\r\n");
+  HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -137,19 +146,29 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-
     /* USER CODE BEGIN 3 */
-    if (HAL_GPIO_ReadPin(BUTTON_GPIO_Port, BUTTON_Pin) == GPIO_PIN_SET)
+    uint8_t c;
+
+    /* Lay het du lieu dang co trong ring buffer, ghep thanh tung dong */
+    while (RB_Get(&rx_rb, &c))
     {
-      HAL_Delay(20);                       /* chong doi phim */
-      if (HAL_GPIO_ReadPin(BUTTON_GPIO_Port, BUTTON_Pin) == GPIO_PIN_SET)
+      if (c == '\r' || c == '\n')
       {
-        TxData[0] = count++;
-        TxData[1] = 0xAB;
-        HAL_CAN_AddTxMessage(&hcan, &TxHeader, TxData, &TxMailbox);
-        while (HAL_GPIO_ReadPin(BUTTON_GPIO_Port, BUTTON_Pin) == GPIO_PIN_SET);
+        if (line_len > 0)
+        {
+          line[line_len] = '\0';
+          Process_Command(line);
+          line_len = 0;
+        }
+      }
+      else if (line_len < sizeof(line) - 1)
+      {
+        line[line_len++] = c;
       }
     }
+
+    /* Vong while ranh tay lam viec khac, du lieu UART khong bi mat */
+    HAL_Delay(100);
   }
   /* USER CODE END 3 */
 }
@@ -190,39 +209,35 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief CAN Initialization Function
+  * @brief USART1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_CAN_Init(void)
+static void MX_USART1_UART_Init(void)
 {
 
-  /* USER CODE BEGIN CAN_Init 0 */
+  /* USER CODE BEGIN USART1_Init 0 */
 
-  /* USER CODE END CAN_Init 0 */
+  /* USER CODE END USART1_Init 0 */
 
-  /* USER CODE BEGIN CAN_Init 1 */
+  /* USER CODE BEGIN USART1_Init 1 */
 
-  /* USER CODE END CAN_Init 1 */
-  hcan.Instance = CAN1;
-  hcan.Init.Prescaler = 4;
-  hcan.Init.Mode = CAN_MODE_NORMAL;
-  hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
-  hcan.Init.TimeSeg1 = CAN_BS1_5TQ;
-  hcan.Init.TimeSeg2 = CAN_BS2_2TQ;
-  hcan.Init.TimeTriggeredMode = DISABLE;
-  hcan.Init.AutoBusOff = DISABLE;
-  hcan.Init.AutoWakeUp = DISABLE;
-  hcan.Init.AutoRetransmission = ENABLE;
-  hcan.Init.ReceiveFifoLocked = DISABLE;
-  hcan.Init.TransmitFifoPriority = DISABLE;
-  if (HAL_CAN_Init(&hcan) != HAL_OK)
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN CAN_Init 2 */
+  /* USER CODE BEGIN USART1_Init 2 */
 
-  /* USER CODE END CAN_Init 2 */
+  /* USER CODE END USART1_Init 2 */
 
 }
 
@@ -248,17 +263,26 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : BUTTON_Pin */
-  GPIO_InitStruct.Pin = BUTTON_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-  HAL_GPIO_Init(BUTTON_GPIO_Port, &GPIO_InitStruct);
-
 }
 
 /* USER CODE BEGIN 4 */
-
+void Process_Command(char *cmd)
+{
+  if (strcmp(cmd, "LED ON") == 0)
+  {
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+    printf("OK: LED ON\r\n");
+  }
+  else if (strcmp(cmd, "LED OFF") == 0)
+  {
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+    printf("OK: LED OFF\r\n");
+  }
+  else
+  {
+    printf("Lenh khong hop le: %s\r\n", cmd);
+  }
+}
 /* USER CODE END 4 */
 
 /**
@@ -292,5 +316,27 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
+
+#if defined(__GNUC__)
+int _write(int fd, char * ptr, int len)
+{
+  HAL_UART_Transmit(&huart1, (uint8_t *) ptr, len, HAL_MAX_DELAY);
+  return len;
+}
+#elif defined (__ICCARM__)
+#include "LowLevelIOInterface.h"
+size_t __write(int handle, const unsigned char * buffer, size_t size)
+{
+  HAL_UART_Transmit(&huart1, (uint8_t *) buffer, size, HAL_MAX_DELAY);
+  return size;
+}
+#elif defined (__CC_ARM)
+int fputc(int ch, FILE *f)
+{
+    HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
+    return ch;
+}
+#endif
 
 /************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/

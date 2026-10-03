@@ -19,6 +19,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include <stdio.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -32,7 +33,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define CAN_ID_BUTTON  0x123
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -41,38 +41,24 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-CAN_HandleTypeDef hcan;
+UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
-CAN_TxHeaderTypeDef TxHeader;
-CAN_RxHeaderTypeDef RxHeader;
-uint8_t TxData[8];
-uint8_t RxData[8];
-uint32_t TxMailbox;
-uint8_t count = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_CAN_Init(void);
+static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+void Blink_Led(uint8_t times);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-/* Nhan ban tin CAN trong ngat FIFO0 */
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
-{
-  if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK)
-  {
-    if (RxHeader.StdId == CAN_ID_BUTTON)
-    {
-      HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-    }
-  }
-}
+/* Chon che do tiet kiem nang luong: 1 = Sleep, 2 = Stop, 3 = Standby */
+#define LOWPOWER_MODE   2
 /* USER CODE END 0 */
 
 /**
@@ -103,33 +89,16 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_CAN_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  CAN_FilterTypeDef sFilter;
+  __HAL_RCC_PWR_CLK_ENABLE();
+  printf("\r\n--- STM32 Low Power, mode %d ---\r\n", LOWPOWER_MODE);
 
-  /* Bo loc: nhan tat ca ban tin vao FIFO0 */
-  sFilter.FilterBank = 0;
-  sFilter.FilterMode = CAN_FILTERMODE_IDMASK;
-  sFilter.FilterScale = CAN_FILTERSCALE_32BIT;
-  sFilter.FilterIdHigh = 0x0000;
-  sFilter.FilterIdLow = 0x0000;
-  sFilter.FilterMaskIdHigh = 0x0000;
-  sFilter.FilterMaskIdLow = 0x0000;
-  sFilter.FilterFIFOAssignment = CAN_RX_FIFO0;
-  sFilter.FilterActivation = ENABLE;
-  sFilter.SlaveStartFilterBank = 14;
-  HAL_CAN_ConfigFilter(&hcan, &sFilter);
-
-  HAL_CAN_Start(&hcan);
-  HAL_CAN_ActivateNotification(&hcan, CAN_IT_RX_FIFO0_MSG_PENDING);
-
-  /* Khung du lieu chuan, ID 11 bit, 2 byte du lieu */
-  TxHeader.StdId = CAN_ID_BUTTON;
-  TxHeader.ExtId = 0;
-  TxHeader.IDE = CAN_ID_STD;
-  TxHeader.RTR = CAN_RTR_DATA;
-  TxHeader.DLC = 2;
-  TxHeader.TransmitGlobalTime = DISABLE;
+  if (__HAL_PWR_GET_FLAG(PWR_FLAG_SB) != RESET)
+  {
+    __HAL_PWR_CLEAR_FLAG(PWR_FLAG_SB);
+    printf("Vua thuc day tu che do Standby\r\n");
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -137,19 +106,31 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-
     /* USER CODE BEGIN 3 */
-    if (HAL_GPIO_ReadPin(BUTTON_GPIO_Port, BUTTON_Pin) == GPIO_PIN_SET)
-    {
-      HAL_Delay(20);                       /* chong doi phim */
-      if (HAL_GPIO_ReadPin(BUTTON_GPIO_Port, BUTTON_Pin) == GPIO_PIN_SET)
-      {
-        TxData[0] = count++;
-        TxData[1] = 0xAB;
-        HAL_CAN_AddTxMessage(&hcan, &TxHeader, TxData, &TxMailbox);
-        while (HAL_GPIO_ReadPin(BUTTON_GPIO_Port, BUTTON_Pin) == GPIO_PIN_SET);
-      }
-    }
+    Blink_Led(5);   /* chay 5 lan nhay LED roi di ngu */
+
+#if (LOWPOWER_MODE == 1)
+    printf("Vao Sleep mode, nhan nut PA0 de thuc day\r\n");
+    HAL_SuspendTick();   /* tat SysTick, neu khong ngat 1ms se danh thuc CPU ngay */
+    HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+    HAL_ResumeTick();
+    printf("Thuc day tu Sleep mode\r\n");
+
+#elif (LOWPOWER_MODE == 2)
+    printf("Vao Stop mode, nhan nut PA0 de thuc day\r\n");
+    HAL_SuspendTick();
+    HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
+    SystemClock_Config();   /* thuc day tu Stop, clock quay ve HSI, phai cau hinh lai */
+    HAL_ResumeTick();
+    printf("Thuc day tu Stop mode\r\n");
+
+#elif (LOWPOWER_MODE == 3)
+    printf("Vao Standby mode, nhan nut PA0 (WKUP) de thuc day\r\n");
+    HAL_PWR_DisableWakeUpPin(PWR_WAKEUP_PIN1);
+    __HAL_PWR_CLEAR_FLAG(PWR_FLAG_WU);
+    HAL_PWR_EnableWakeUpPin(PWR_WAKEUP_PIN1);
+    HAL_PWR_EnterSTANDBYMode();   /* thuc day tu Standby = reset lai tu dau */
+#endif
   }
   /* USER CODE END 3 */
 }
@@ -190,39 +171,35 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief CAN Initialization Function
+  * @brief USART1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_CAN_Init(void)
+static void MX_USART1_UART_Init(void)
 {
 
-  /* USER CODE BEGIN CAN_Init 0 */
+  /* USER CODE BEGIN USART1_Init 0 */
 
-  /* USER CODE END CAN_Init 0 */
+  /* USER CODE END USART1_Init 0 */
 
-  /* USER CODE BEGIN CAN_Init 1 */
+  /* USER CODE BEGIN USART1_Init 1 */
 
-  /* USER CODE END CAN_Init 1 */
-  hcan.Instance = CAN1;
-  hcan.Init.Prescaler = 4;
-  hcan.Init.Mode = CAN_MODE_NORMAL;
-  hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
-  hcan.Init.TimeSeg1 = CAN_BS1_5TQ;
-  hcan.Init.TimeSeg2 = CAN_BS2_2TQ;
-  hcan.Init.TimeTriggeredMode = DISABLE;
-  hcan.Init.AutoBusOff = DISABLE;
-  hcan.Init.AutoWakeUp = DISABLE;
-  hcan.Init.AutoRetransmission = ENABLE;
-  hcan.Init.ReceiveFifoLocked = DISABLE;
-  hcan.Init.TransmitFifoPriority = DISABLE;
-  if (HAL_CAN_Init(&hcan) != HAL_OK)
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN CAN_Init 2 */
+  /* USER CODE BEGIN USART1_Init 2 */
 
-  /* USER CODE END CAN_Init 2 */
+  /* USER CODE END USART1_Init 2 */
 
 }
 
@@ -249,16 +226,34 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : BUTTON_Pin */
+  /*Configure GPIO pin : BUTTON_Pin (EXTI0, canh len) */
   GPIO_InitStruct.Pin = BUTTON_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(BUTTON_GPIO_Port, &GPIO_InitStruct);
 
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 }
 
 /* USER CODE BEGIN 4 */
+void Blink_Led(uint8_t times)
+{
+  uint8_t i;
+  for (i = 0; i < times; i++)
+  {
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+    HAL_Delay(200);
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+    HAL_Delay(200);
+  }
+}
 
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  /* Chi can co ngat la CPU thuc day, khong can xu ly gi them */
+}
 /* USER CODE END 4 */
 
 /**
@@ -292,5 +287,27 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
+
+#if defined(__GNUC__)
+int _write(int fd, char * ptr, int len)
+{
+  HAL_UART_Transmit(&huart1, (uint8_t *) ptr, len, HAL_MAX_DELAY);
+  return len;
+}
+#elif defined (__ICCARM__)
+#include "LowLevelIOInterface.h"
+size_t __write(int handle, const unsigned char * buffer, size_t size)
+{
+  HAL_UART_Transmit(&huart1, (uint8_t *) buffer, size, HAL_MAX_DELAY);
+  return size;
+}
+#elif defined (__CC_ARM)
+int fputc(int ch, FILE *f)
+{
+    HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
+    return ch;
+}
+#endif
 
 /************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
